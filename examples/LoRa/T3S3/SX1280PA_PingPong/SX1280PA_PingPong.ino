@@ -8,7 +8,7 @@
 // uncomment the following only on one
 // of the nodes to initiate the pings
 // 注释INITIATING_NODE这行初始化接收,打开这行初始化发送,两个设备，必须一个初始化为接收另一个初始化为发送才能收到
-// #define INITIATING_NODE
+ #define INITIATING_NODE
 
 // Board pin definitions
 #define I2C_SDA                     18
