@@ -1,0 +1,12 @@
+If:
+  PathMatch: .*\.ino
+CompileFlags:
+  Add: [-xc++, -std=gnu++11]
+
+---
+
+CompileFlags:
+  CompilationDatabase: .pio/build/T3_S3_V1_2_SX1280_PA
+  Add:
+    - -Wno-unknown-warning-option
+    - -ferror-limit=0
