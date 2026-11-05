@@ -5,9 +5,6 @@
 
 #include <RadioLib.h>
 
-// Uncomment on one node to initiate the packet exchange.
-//#define INITIATING_NODE
-
 // Board pin definitions
 #define I2C_SDA                     18
 #define I2C_SCL                     17
@@ -33,7 +30,7 @@
 #define CONFIG_RADIO_FREQ           2400.0
 #define CONFIG_FLRC_BIT_RATE        520
 
-#define USE_FLRC
+// #define USE_FLRC
 // Comment out USE_FLRC to test with LoRa instead.
 
 /*
@@ -46,21 +43,62 @@
 */
 #define CONFIG_RADIO_OUTPUT_POWER   3
 
+
+
+// Binary packet: 4-byte sequence number followed by 120 signed 16-bit samples.
+const uint16_t SAMPLE_RATE = 16000;
+const uint16_t FREQUENCY = 440;
+const size_t SAMPLES_PER_PACKET = 120;
+const size_t PACKET_HEADER_SIZE = 4;
+const size_t PACKET_SIZE = PACKET_HEADER_SIZE + SAMPLES_PER_PACKET * sizeof(int16_t);
+uint8_t txPacket[PACKET_SIZE];
+
+
 SX1280 radio = new Module(RADIO_CS_PIN, RADIO_DIO1_PIN, RADIO_RST_PIN, RADIO_BUSY_PIN);
 
-// save transmission states between loops
 int transmissionState = RADIOLIB_ERR_NONE;
-
-// flag to indicate transmission or reception state
-bool transmitFlag = false;
-
-// flag to indicate that a packet was sent or received
 volatile bool operationDone = false;
+float phase = 0;
+uint32_t packetSequence = 0;
 
 void setFlag(void)
 {
-    // we sent or received a packet, set the flag
     operationDone = true;
+}
+
+void startAudioPacket()
+{
+    // Header of the packet
+    txPacket[0] = packetSequence & 0xFF;
+    txPacket[1] = (packetSequence >> 8) & 0xFF;
+    txPacket[2] = (packetSequence >> 16) & 0xFF;
+    txPacket[3] = (packetSequence >> 24) & 0xFF;
+    packetSequence++;
+
+    // Generating the samples
+    for (size_t i = 0; i < SAMPLES_PER_PACKET; i++) {
+        int16_t sample = 12000 * sin(phase);
+        size_t offset = PACKET_HEADER_SIZE + i * sizeof(sample);
+        uint16_t encodedSample = (uint16_t)sample;
+        txPacket[offset] = encodedSample & 0xFF;
+        txPacket[offset + 1] = encodedSample >> 8;
+
+        phase += 2.0f * PI * FREQUENCY / SAMPLE_RATE;
+        if (phase >= 2.0f * PI) {
+            phase -= 2.0f * PI;
+        }
+    }
+
+    transmissionState = radio.startTransmit(txPacket, sizeof(txPacket));
+
+    if (transmissionState != RADIOLIB_ERR_NONE) {
+        Serial.print(F("[SX1280PA] Transmit start failed, code "));
+        Serial.println(transmissionState);
+        while (true) {
+            delay(10);
+        }
+    }
+
 }
 
 void setup()
@@ -82,12 +120,23 @@ void setup()
     config.power = CONFIG_RADIO_OUTPUT_POWER;
     config.preambleLength = 16;
     config.dataShaping = RADIOLIB_SHAPING_1_0;
+
     state = radio.beginFLRC(config);
-#else
-    state = radio.begin(CONFIG_RADIO_FREQ);
-    if (state == RADIOLIB_ERR_NONE) {
-        state = radio.setOutputPower(CONFIG_RADIO_OUTPUT_POWER);
-    }
+    Serial.println(F("Running FLRC mode"));
+
+#else // Use LoRa mode
+    ConfigLoRa_t config;
+    config.frequency = CONFIG_RADIO_FREQ;
+    config.bandwidth = 812.5;
+    config.spreadingFactor = 5;
+    config.codingRate = 7;  // 4/7
+    config.syncWord = RADIOLIB_SX128X_SYNC_WORD_PRIVATE;
+    config.power = CONFIG_RADIO_OUTPUT_POWER;
+    config.preambleLength = 12;           
+
+    state = radio.begin(config);
+    Serial.println(F("Running LoRa mode"));
+
 #endif
 
     if (state == RADIOLIB_ERR_NONE) {
@@ -100,9 +149,7 @@ void setup()
         }
     }
 
-    // set the function that will be called
-    // when new packet is received
-    radio.setDio1Action(setFlag);
+    radio.setPacketSentAction(setFlag);
 
     // Set RF switch pins
     radio.setRfSwitchPins(RADIO_RX_PIN, RADIO_TX_PIN);
@@ -117,91 +164,22 @@ void setup()
     }
 #endif
 
-#if defined(INITIATING_NODE)
-    // send the first packet on this node
-    Serial.print(F("[SX1280PA] Sending first packet ... "));
-    transmissionState = radio.startTransmit("Hello World!");
-    transmitFlag = true;
-#else
-    // Start listening for packets on this node.
-    Serial.print(F("[SX1280PA] Starting to listen ... "));
-    state = radio.startReceive();
-    if (state == RADIOLIB_ERR_NONE) {
-        Serial.println(F("success!"));
-    } else {
-        Serial.print(F("failed, code "));
-        Serial.println(state);
-        while (true) {
-            delay(10);
-        }
-    }
-#endif
+    Serial.println(F("[SX1280PA] Starting binary packet stream"));
+    startAudioPacket();
 }
 
 void loop()
 {
-    // check if the previous operation finished
-    if (operationDone) {
-        // reset flag
-        operationDone = false;
-
-        if (transmitFlag) {
-
-            digitalWrite(BOARD_LED, 1 - digitalRead(BOARD_LED));
-
-            // the previous operation was transmission, listen for response
-            // print the result
-            if (transmissionState == RADIOLIB_ERR_NONE) {
-                // packet was successfully sent
-                Serial.println(F("transmission finished!"));
-
-            } else {
-                Serial.print(F("failed, code "));
-                Serial.println(transmissionState);
-
-            }
-
-            // listen for response
-            radio.startReceive();
-            transmitFlag = false;
-
-        } else {
-            // the previous operation was reception
-            // print data and send another packet
-            String str;
-            int state = radio.readData(str);
-
-            if (state == RADIOLIB_ERR_NONE) {
-
-                digitalWrite(BOARD_LED, 1 - digitalRead(BOARD_LED));
-
-                // packet was successfully received
-                Serial.println(F("[SX1280PA] Received packet!"));
-
-                // print data of the packet
-                Serial.print(F("[SX1280PA] Data:\t\t"));
-                Serial.println(str);
-
-                // print RSSI (Received Signal Strength Indicator)
-                Serial.print(F("[SX1280PA] RSSI:\t\t"));
-                Serial.print(radio.getRSSI());
-                Serial.println(F(" dBm"));
-
-                // print SNR (Signal-to-Noise Ratio)
-                Serial.print(F("[SX1280PA] SNR:\t\t"));
-                Serial.print(radio.getSNR());
-                Serial.println(F(" dB"));
-
-            }
-
-            // wait a second before transmitting again
-            delay(1000);
-
-            // send another one
-            Serial.print(F("[SX1280PA] Sending another packet ... "));
-            transmissionState = radio.startTransmit("BOOTY CHEEKS");
-            transmitFlag = true;
-        }
-
+    if (!operationDone) {
+        return;
     }
+
+    operationDone = false;
+    int state = radio.finishTransmit();
+    if (state != RADIOLIB_ERR_NONE) {
+        // handle error
+    }
+
+    // delay(10);  // diagnostic only: pause between packets
+    startAudioPacket();
 }

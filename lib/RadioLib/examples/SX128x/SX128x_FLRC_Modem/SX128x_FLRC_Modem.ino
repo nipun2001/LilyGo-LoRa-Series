@@ -113,3 +113,19 @@ void loop() {
     Serial.println(state);
   }
 }
+
+
+void generateAudio()
+{
+    static float phase = 0;
+
+    for (int i = 0; i < SAMPLES_PER_BUFFER; i++) {
+        audioBuffer[i] = 12000 * sin(phase);
+
+        phase += 2.0f * PI * FREQUENCY / SAMPLE_RATE;
+
+        if (phase >= 2.0f * PI) {
+            phase -= 2.0f * PI;
+        }
+    }
+}

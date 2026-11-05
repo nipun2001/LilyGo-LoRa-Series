@@ -33,7 +33,7 @@
 #define CONFIG_RADIO_FREQ           2400.0
 #define CONFIG_FLRC_BIT_RATE        520
 
-#define USE_FLRC
+// #define USE_FLRC
 // Comment out USE_FLRC to test with LoRa instead.
 
 /*
@@ -48,14 +48,10 @@
 
 SX1280 radio = new Module(RADIO_CS_PIN, RADIO_DIO1_PIN, RADIO_RST_PIN, RADIO_BUSY_PIN);
 
-// save transmission states between loops
-int transmissionState = RADIOLIB_ERR_NONE;
-
-// flag to indicate transmission or reception state
-bool transmitFlag = false;
-
-// flag to indicate that a packet was sent or received
 volatile bool operationDone = false;
+uint8_t rxPacket[244];
+uint32_t expectedSequence = 0;
+bool receivedFirstPacket = false;
 
 void setFlag(void)
 {
@@ -82,12 +78,21 @@ void setup()
     config.power = CONFIG_RADIO_OUTPUT_POWER;
     config.preambleLength = 16;
     config.dataShaping = RADIOLIB_SHAPING_1_0;
+
     state = radio.beginFLRC(config);
-#else
-    state = radio.begin(CONFIG_RADIO_FREQ);
-    if (state == RADIOLIB_ERR_NONE) {
-        state = radio.setOutputPower(CONFIG_RADIO_OUTPUT_POWER);
-    }
+    Serial.println(F("Running FLRC mode"));
+#else // Use LoRa mode
+    ConfigLoRa_t config;
+    config.frequency = CONFIG_RADIO_FREQ;
+    config.bandwidth = 812.5;
+    config.spreadingFactor = 5;
+    config.codingRate = 7;  // 4/7
+    config.syncWord = RADIOLIB_SX128X_SYNC_WORD_PRIVATE;
+    config.power = CONFIG_RADIO_OUTPUT_POWER;
+    config.preambleLength = 12;
+
+    state = radio.begin(config);
+    Serial.println(F("Running LoRa mode"));
 #endif
 
     if (state == RADIOLIB_ERR_NONE) {
@@ -100,9 +105,7 @@ void setup()
         }
     }
 
-    // set the function that will be called
-    // when new packet is received
-    radio.setDio1Action(setFlag);
+    radio.setPacketReceivedAction(setFlag);
 
     // Set RF switch pins
     radio.setRfSwitchPins(RADIO_RX_PIN, RADIO_TX_PIN);
@@ -117,13 +120,7 @@ void setup()
     }
 #endif
 
-#if defined(INITIATING_NODE)
-    // send the first packet on this node
-    Serial.print(F("[SX1280PA] Sending first packet ... "));
-    transmissionState = radio.startTransmit("Hello World!");
-    transmitFlag = true;
-#else
-    // Start listening for packets on this node.
+
     Serial.print(F("[SX1280PA] Starting to listen ... "));
     state = radio.startReceive();
     if (state == RADIOLIB_ERR_NONE) {
@@ -135,37 +132,67 @@ void setup()
             delay(10);
         }
     }
-#endif
 }
 
 void loop()
 {
-    if (operationDone) {
-        operationDone = false;
+    if (!operationDone) {
+        return;
+    }
+    operationDone = false;
 
-        String str;
-        int state = radio.readData(str);
-
-        if (state == RADIOLIB_ERR_NONE) {
-            Serial.println("[SX1280PA] Received packet!");
-
-            Serial.print("[SX1280PA] Data: ");
-            Serial.println(str);
-
-            Serial.print("[SX1280PA] Packet length: ");
-            Serial.println(str.length());
-
-            Serial.print("[SX1280PA] RSSI: ");
-            Serial.println(radio.getRSSI());
-
-            Serial.print("[SX1280PA] SNR: ");
-            Serial.println(radio.getSNR());
-
+    size_t packetLength = radio.getPacketLength();
+    int state = radio.readData(rxPacket, sizeof(rxPacket));
+    
+    if (state == RADIOLIB_ERR_NONE) {
+        if (packetLength < 6 || (packetLength - 4) % 2 != 0) {
+            Serial.print(F("[SX1280PA] Invalid audio packet length: "));
+            Serial.println(packetLength);
         } else {
-            Serial.print("[SX1280PA] Receive error: ");
-            Serial.println(state);
-        }
+            uint32_t sequence = (uint32_t)rxPacket[0]
+                | ((uint32_t)rxPacket[1] << 8)
+                | ((uint32_t)rxPacket[2] << 16)
+                | ((uint32_t)rxPacket[3] << 24);
+            int16_t firstSample = (int16_t)((uint16_t)rxPacket[4]
+                | ((uint16_t)rxPacket[5] << 8));
 
-        radio.startReceive();
+            if (receivedFirstPacket && sequence != expectedSequence) {
+                Serial.print(F("[SX1280PA] Packet sequence gap: expected "));
+                Serial.print(expectedSequence);
+                Serial.print(F(", received "));
+                Serial.println(sequence);
+            }
+            expectedSequence = sequence + 1;
+            receivedFirstPacket = true;
+
+            static uint32_t packetsReceived = 0;
+            packetsReceived++;
+            if (packetsReceived == 1 || packetsReceived % 50 == 0) {
+                Serial.print(F("[SX1280PA] Packet #"));
+                Serial.print(sequence);
+                Serial.print(F(", bytes="));
+                Serial.print(packetLength);
+                // Serial.print(sizeof(rxPacket));           
+                Serial.print(F(", first sample="));
+                Serial.print(firstSample);
+                Serial.print(F(", RSSI="));
+                Serial.print(radio.getRSSI());
+                Serial.print(F(" dBm, SNR="));
+                Serial.print(radio.getSNR());
+                Serial.println(F(" dB"));
+            }
+        }
+    } else {
+        Serial.print(F("[SX1280PA] Receive error: "));
+        Serial.println(state);
+    }
+
+    state = radio.startReceive();
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.print(F("[SX1280PA] Restart receive failed, code "));
+        Serial.println(state);
+        while (true) {
+            delay(10);
+        }
     }
 }

@@ -13,4 +13,5 @@ build
 LilyGoLoRaBoard
 record.*
 data
+logs.txt
 # *.zip
